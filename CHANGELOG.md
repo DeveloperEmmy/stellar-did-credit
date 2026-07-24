@@ -13,6 +13,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `credit-oracle`: `compute_score` now emits a `Score` event with topic `Symbol("Score")` and data `(subject, score)` on every successful score computation (#223)
 - `credit-oracle`: `set_identity_oracle(admin, identity_oracle_id)` — admin-gated function that stores the identity-oracle contract ID for live VC count lookups (#176)
 - `credit-oracle`: cross-contract `compute_score` now calls `get_active_vc_count` on identity-oracle (excluding revoked VCs) when `IdentityOracleId` is configured, falling back to the cached `VcCount` otherwise (#176)
 - Integration test `test_cross_contract_score_not_inflated_after_revocation` verifies that revoking VCs via identity-oracle immediately lowers the credit score when the cross-contract path is active (#176)

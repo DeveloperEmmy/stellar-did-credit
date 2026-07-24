@@ -552,6 +552,9 @@ impl CreditOracle {
             },
         );
 
+        env.events()
+            .publish((symbol_short!("Score"),), (subject.clone(), score));
+
         env.storage()
             .persistent()
             .set(&DataKey::LastComputed(subject), &current_ledger);
@@ -901,6 +904,50 @@ mod tests {
 
         let score = client.compute_score(&subject);
         assert_eq!(score, MIN_SCORE);
+    }
+
+    #[test]
+    fn test_compute_score_emits_score_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let subject = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Compute the score which should emit a Score event
+        let score = client.compute_score(&subject);
+
+        // Retrieve all emitted events
+        let events = env.events().all();
+
+        // Should be exactly one event (the Score event)
+        assert_eq!(events.len(), 1, "expected exactly one event");
+
+        let (event_contract_id, topics, data) = &events.get(0).unwrap();
+
+        // Verify the event was emitted by this contract
+        assert_eq!(*event_contract_id, contract_id, "event contract id mismatch");
+
+        // Verify the topic is Symbol("Score")
+        assert_eq!(
+            topics.len(),
+            1,
+            "expected 1 topic element"
+        );
+        let topic = topics.get(0).unwrap();
+        assert_eq!(
+            topic,
+            soroban_sdk::Val::from(symbol_short!("Score")),
+            "expected Score topic"
+        );
+
+        // Verify the data payload is (subject, score)
+        let (event_subject, event_score): (Address, u32) = data.clone().unwrap();
+        assert_eq!(event_subject, subject, "event subject mismatch");
+        assert_eq!(event_score, score, "event score mismatch");
     }
 
     #[test]
