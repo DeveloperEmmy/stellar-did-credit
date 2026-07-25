@@ -159,6 +159,8 @@ All three contracts apply this pattern in `initialize` and every admin-gated fun
 
 Non-admin functions such as `anchor_did`, `anchor_vc`, `compute_score`, `revoke`, etc. touch only persistent storage and do not need to extend the instance TTL. If the contract is not called by an admin for an extended period, anyone can call any of the covered admin-gated functions (with admin authentication) to refresh the TTL.
 
+> **Full treatment:** The [Epoch Model](epoch-model.md) document covers TTL management in depth — what each function bumps, what gets invalidated on expiry, and how to maintain liveness. It also explains related ledger-based mechanisms (compute cooldown, weight timelock, score staleness) that are not covered here.
+
 ---
 
 ## Cross-contract interaction
