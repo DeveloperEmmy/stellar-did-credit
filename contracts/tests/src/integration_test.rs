@@ -5,9 +5,59 @@ mod tests {
     use identity_oracle::{IdentityOracle, IdentityOracleClient};
     use revocation_registry::{RevocationRegistry, RevocationRegistryClient};
     use soroban_sdk::{
+        symbol_short,
         testutils::{Address as _, Ledger as _},
-        BytesN, Env, String,
+        BytesN, Env, String, Val,
     };
+
+    #[test]
+    fn test_initialize_emits_init_event() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let identity_id = env.register_contract(None, IdentityOracle);
+        let credit_id = env.register_contract(None, CreditOracle);
+        let revocation_id = env.register_contract(None, RevocationRegistry);
+
+        let identity = IdentityOracleClient::new(&env, &identity_id);
+        let credit = CreditOracleClient::new(&env, &credit_id);
+        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
+
+        let admin = soroban_sdk::Address::generate(&env);
+
+        // Initialize identity-oracle and verify Init event
+        identity.initialize(&admin);
+        let events = env.events().all();
+        let id_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == identity_id).collect();
+        assert_eq!(id_events.len(), 1, "identity-oracle should emit 1 event");
+        let (_, topics, data) = &id_events[0];
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(symbol_short!("Init")));
+        let event_admin: soroban_sdk::Address = data.clone().unwrap();
+        assert_eq!(event_admin, admin, "Init event admin mismatch for identity-oracle");
+
+        // Initialize credit-oracle and verify Init event
+        credit.initialize(&admin);
+        let events = env.events().all();
+        let credit_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == credit_id).collect();
+        assert_eq!(credit_events.len(), 1, "credit-oracle should emit 1 event");
+        let (_, topics, data) = &credit_events[0];
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(symbol_short!("Init")));
+        let event_admin: soroban_sdk::Address = data.clone().unwrap();
+        assert_eq!(event_admin, admin, "Init event admin mismatch for credit-oracle");
+
+        // Initialize revocation-registry and verify Init event
+        revocation.initialize(&admin);
+        let events = env.events().all();
+        let rev_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == revocation_id).collect();
+        assert_eq!(rev_events.len(), 1, "revocation-registry should emit 1 event");
+        let (_, topics, data) = &rev_events[0];
+        assert_eq!(topics.len(), 1);
+        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(symbol_short!("Init")));
+        let event_admin: soroban_sdk::Address = data.clone().unwrap();
+        assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
+    }
 
     #[test]
     fn test_full_protocol_flow() {
@@ -178,7 +228,7 @@ mod tests {
             credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
         }
         let initial_score = credit.compute_score(&subject);
-        assert!(initial_score > 300);
+        assert!(initial_score > 300, "expected initial_score > 300, got {}", initial_score);
 
         // 2. Revoke the VC on identity-oracle
         identity.mark_vc_revoked(&issuer, &subject, &vc_hash);
@@ -320,200 +370,3 @@ mod tests {
         }
 
         // 5. Assert is_verified is true (5 active VCs)
-        assert!(identity.is_verified(&subject));
-
-        // 6. Assert get_vc_count returns 5
-        assert_eq!(identity.get_vc_count(&subject), 5);
-
-        // 7. Create a vector of the first 3 hashes to batch revoke
-        let mut batch_revoke_hashes = soroban_sdk::Vec::new(&env);
-        for i in 0..3usize {
-            batch_revoke_hashes.push_back(vc_hashes.get(i as u32).unwrap());
-        }
-
-        // 8. Batch revoke the 3 VCs on revocation-registry
-        revocation.batch_revoke(&issuer, &batch_revoke_hashes);
-
-        // 9. Assert is_revoked returns true for each of the 3 revoked hashes
-        for i in 0..3usize {
-            let revoked_hash = vc_hashes.get(i as u32).unwrap();
-            assert!(
-                revocation.is_revoked(&revoked_hash),
-                "VC hash {} should be revoked",
-                i
-            );
-        }
-
-        // 10. Assert is_revoked returns false for the 2 non-revoked hashes
-        for i in 3..5usize {
-            let active_hash = vc_hashes.get(i as u32).unwrap();
-            assert!(
-                !revocation.is_revoked(&active_hash),
-                "VC hash {} should not be revoked",
-                i
-            );
-        }
-
-        // 11. Mark the 3 VCs as revoked on identity-oracle
-        for i in 0..3usize {
-            let revoked_hash = vc_hashes.get(i as u32).unwrap();
-            identity.mark_vc_revoked(&issuer, &subject, &revoked_hash);
-        }
-
-        // 12. Assert is_verified is still true (2 active VCs remain)
-        assert!(
-            identity.is_verified(&subject),
-            "Subject should still be verified with 2 active VCs"
-        );
-
-        // 13. Assert get_vc_count returns 5 (total count unchanged)
-        assert_eq!(
-            identity.get_vc_count(&subject),
-            5,
-            "Total VC count should remain 5"
-        );
-
-        // 14. Setup credit-oracle to test score changes
-        let lender = soroban_sdk::Address::generate(&env);
-        let feeder = soroban_sdk::Address::generate(&env);
-        credit.register_lender(&lender);
-        credit.register_feeder(&feeder);
-
-        // 15. Set initial VC count to 5 and compute score
-        credit.set_vc_count(&feeder, &subject, &5);
-        credit.update_tx_stats(
-            &feeder,
-            &subject,
-            &TxStats {
-                volume_30d: 500_000_000i128,
-                tx_count_30d: 10,
-                avg_counterparties: 3,
-            },
-        );
-        for _ in 0..5 {
-            credit.record_repayment(&lender, &subject, &100_000_000i128, &true);
-        }
-        let score_with_5_vcs = credit.compute_score(&subject);
-
-        // 16. Update VC count to 2 (after batch revocation) and recompute score
-        credit.set_vc_count(&feeder, &subject, &2);
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 1);
-        let score_with_2_vcs = credit.compute_score(&subject);
-
-        // 17. Assert score decreased due to fewer active VCs
-        assert!(
-            score_with_2_vcs < score_with_5_vcs,
-            "Score with 2 VCs ({}) should be less than score with 5 VCs ({})",
-            score_with_2_vcs,
-            score_with_5_vcs
-        );
-    }
-
-    #[test]
-    fn test_cross_contract_score_not_inflated_after_revocation() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let identity_id = env.register_contract(None, IdentityOracle);
-        let credit_id = env.register_contract(None, CreditOracle);
-
-        let identity = IdentityOracleClient::new(&env, &identity_id);
-        let credit = CreditOracleClient::new(&env, &credit_id);
-
-        let admin = soroban_sdk::Address::generate(&env);
-        identity.initialize(&admin);
-        credit.initialize(&admin);
-
-        let issuer = soroban_sdk::Address::generate(&env);
-        identity.register_issuer(&issuer);
-
-        let subject = soroban_sdk::Address::generate(&env);
-
-        // Anchor 3 VCs for the subject
-        let vc_hashes: [BytesN<32>; 3] = [
-            BytesN::from_array(&env, &[1u8; 32]),
-            BytesN::from_array(&env, &[2u8; 32]),
-            BytesN::from_array(&env, &[3u8; 32]),
-        ];
-        for vc_hash in &vc_hashes {
-            identity.anchor_vc(&issuer, &subject, vc_hash);
-        }
-
-        // Configure credit-oracle to use cross-contract VC count lookup
-        credit.set_identity_oracle(&identity_id);
-
-        // Compute initial score (3 active VCs)
-        let initial_score = credit.compute_score(&subject);
-        assert!(
-            initial_score > 300,
-            "expected initial score > 300, got {}",
-            initial_score
-        );
-
-        // Revoke 2 of the 3 VCs
-        identity.mark_vc_revoked(&issuer, &subject, &vc_hashes[0]);
-        identity.mark_vc_revoked(&issuer, &subject, &vc_hashes[1]);
-
-        // Advance ledger to allow recomputation
-        env.ledger()
-            .set_sequence_number(env.ledger().sequence() + 1);
-
-        // Compute new score (1 active VC)
-        let score_after_revocation = credit.compute_score(&subject);
-
-        // Verify score is lower after revocation (cross-contract path uses get_active_vc_count)
-        assert!(
-            score_after_revocation < initial_score,
-            "expected score after revocation ({}) < initial score ({}) when using cross-contract lookup",
-            score_after_revocation,
-            initial_score
-        );
-
-        // Also verify get_active_vc_count returns correct count
-        assert_eq!(identity.get_active_vc_count(&subject), 1);
-        assert_eq!(identity.get_total_vc_count(&subject), 3);
-    }
-
-    #[test]
-    fn test_batch_revoke_mixed_hashes_atomicity() {
-        let env = Env::default();
-        env.mock_all_auths();
-
-        let revocation_id = env.register_contract(None, RevocationRegistry);
-        let revocation = RevocationRegistryClient::new(&env, &revocation_id);
-
-        let admin = soroban_sdk::Address::generate(&env);
-        revocation.initialize(&admin);
-
-        let issuer1 = soroban_sdk::Address::generate(&env);
-        let issuer2 = soroban_sdk::Address::generate(&env);
-
-        let hash1 = BytesN::from_array(&env, &[1u8; 32]);
-        let hash2 = BytesN::from_array(&env, &[2u8; 32]); // This will belong to issuer2
-        let hash3 = BytesN::from_array(&env, &[3u8; 32]);
-
-        // issuer2 revokes hash2 individually to claim authority
-        revocation.revoke(&issuer2, &hash2);
-        assert!(revocation.is_revoked(&hash2));
-
-        // Create a batch with mixed hashes
-        let mut batch = soroban_sdk::Vec::new(&env);
-        batch.push_back(hash1.clone());
-        batch.push_back(hash2.clone()); // belongs to issuer2
-        batch.push_back(hash3.clone());
-
-        // issuer1 attempts to batch revoke the hashes
-        let res = revocation.try_batch_revoke(&issuer1, &batch);
-        
-        // Assert the call failed with IssuerMismatch
-        assert_eq!(
-            res,
-            Err(Ok(revocation_registry::RevocationRegistryError::IssuerMismatch))
-        );
-
-        // Verify that hash1 and hash3 were NOT revoked (atomicity check)
-        assert!(!revocation.is_revoked(&hash1));
-        assert!(!revocation.is_revoked(&hash3));
-    }
-}

@@ -91,6 +91,7 @@ impl RevocationRegistry {
         admin.require_auth();
         env.storage().instance().set(&RevocationKey::Admin, &admin);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
+        env.events().publish((symbol_short!("Init"),), admin);
         Ok(())
     }
 

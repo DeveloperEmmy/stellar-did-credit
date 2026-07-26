@@ -322,6 +322,7 @@ impl CreditOracle {
             &DataKey::ComputeCooldownLedgers,
             &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
         );
+        env.events().publish((symbol_short!("Init"),), admin);
         Ok(())
     }
 
@@ -1074,24 +1075,34 @@ mod tests {
         // Compute the score which should emit a Score event
         let score = client.compute_score(&subject);
 
-        // Retrieve all emitted events
+        // Retrieve all emitted events (Init + Score = 2)
         let events = env.events().all();
 
-        // Should be exactly one event (the Score event)
-        assert_eq!(events.len(), 1, "expected exactly one event");
+        // There should be exactly 2 events: Init (from initialize) and Score
+        assert_eq!(events.len(), 2, "expected 2 events (Init + Score)");
 
-        let (event_contract_id, topics, data) = &events.get(0).unwrap();
-
-        // Verify the event was emitted by this contract
-        assert_eq!(*event_contract_id, contract_id, "event contract id mismatch");
-
-        // Verify the topic is Symbol("Score")
+        // First event should be Init
+        let (event_contract_id_0, topics_0, data_0) = &events.get(0).unwrap();
+        assert_eq!(*event_contract_id_0, contract_id);
+        assert_eq!(topics_0.len(), 1);
         assert_eq!(
-            topics.len(),
+            topics_0.get(0).unwrap(),
+            soroban_sdk::Val::from(symbol_short!("Init")),
+            "expected Init topic"
+        );
+        let event_admin: Address = data_0.clone().unwrap();
+        assert_eq!(event_admin, admin);
+
+        // Second event should be Score
+        let (event_contract_id_1, topics_1, data_1) = &events.get(1).unwrap();
+        assert_eq!(*event_contract_id_1, contract_id, "event contract id mismatch");
+
+        assert_eq!(
+            topics_1.len(),
             1,
             "expected 1 topic element"
         );
-        let topic = topics.get(0).unwrap();
+        let topic = topics_1.get(0).unwrap();
         assert_eq!(
             topic,
             soroban_sdk::Val::from(symbol_short!("Score")),
@@ -1099,7 +1110,7 @@ mod tests {
         );
 
         // Verify the data payload is (subject, score)
-        let (event_subject, event_score): (Address, u32) = data.clone().unwrap();
+        let (event_subject, event_score): (Address, u32) = data_1.clone().unwrap();
         assert_eq!(event_subject, subject, "event subject mismatch");
         assert_eq!(event_score, score, "event score mismatch");
     }
