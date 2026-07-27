@@ -57,7 +57,7 @@ The protocol admin must register each trusted issuer before that address can cal
 | `anchor_vc(issuer, subject, vc_hash)`       | issuer   | Records a SHA-256 hash of an off-chain VC                   |
 | `mark_vc_revoked(issuer, subject, vc_hash)` | issuer   | Marks a specific VC as revoked                              |
 | `is_verified(subject)`                      | anyone   | Returns true if the subject has at least one non-revoked VC |
-| `get_active_vc_count(subject)`           | anyone   | Returns anchored VC count excluding revoked entries         |
+| `get_active_vc_count(subject)`              | anyone   | Returns the cached active VC count; seeded lazily from existing anchors and then maintained on `anchor_vc` / `mark_vc_revoked` |
 | `verify_vc(subject, vc_hash)`               | anyone   | Returns true if a specific VC exists and is not revoked     |
 
 **Storage layout**
@@ -69,6 +69,7 @@ The protocol admin must register each trusted issuer before that address can cal
 | `IssuersIndex`           | `Vec<Address>`  | Persistent — append-only list of every address ever registered; `list_issuers()` filters this against `TrustedIssuer` |
 | `DIDDocument(Address)`   | `String`        | Persistent — IPFS CID of the subject's DID document    |
 | `VCAnchors(Address)`     | `Vec<VCRecord>` | Persistent — list of VC anchor records for a subject   |
+| `ActiveVCCount(Address)` | `u32`           | Persistent — cached count of active VC anchors for the subject |
 
 ---
 
@@ -131,6 +132,28 @@ A minimal, standalone registry that maps VC hashes to their revocation status. I
 
 ---
 
+## Admin Transfer Two-Step Flow
+
+All three contracts (`identity-oracle`, `credit-oracle`, and `revocation-registry`) use a two-step process to transfer the `Admin` role to a new address. This design ensures that the contract never ends up in an unrecoverable state if an incorrect admin address is accidentally proposed (e.g., a typo in the address, or an address the user doesn't possess the private key for).
+
+### Flow Mechanics
+
+1. **`propose_new_admin(env, new_admin)`**
+   - **Caller**: The current `Admin`.
+   - **Action**: Stores the `new_admin` address in the contract's instance storage under `DataKey::PendingAdmin`.
+   - **Note**: The current admin retains full authority until the transfer is accepted.
+
+2. **`accept_admin(env, new_admin)`**
+   - **Caller**: The `new_admin` (the proposed pending admin).
+   - **Action**: Reads the `PendingAdmin` from storage. If it matches the caller, the contract overwrites the main `Admin` key with the new address and clears the `PendingAdmin` key. The caller now holds full admin authority.
+
+### Governance Edge Case
+
+The `governance` contract acts as an automated admin for the `credit-oracle`. During deployment/setup, the deployer (acting as the initial `credit-oracle` admin) calls `propose_new_admin(gov_contract_address)`. 
+
+Subsequently, the `governance` contract calls its own `accept_oracle_admin()` function, which dynamically invokes `accept_admin` on the `credit-oracle`. Thus, the `governance` contract does not itself call `propose_new_admin` during its own adoption phase; it simply accepts the admin role that was already proposed to it by the deployer.
+
+---
 ## Instance storage TTL management
 
 Soroban entries have a limited time-to-live (TTL) measured in ledgers. If the TTL of a contract's **instance storage** entry reaches zero, the contract becomes archived — all its data is lost and it can never be called again. To prevent this, every function that reads or writes instance storage must periodically call `extend_ttl`.
@@ -192,6 +215,10 @@ sequenceDiagram
 ```
 
 In this path, the `credit-oracle` uses `env.invoke_contract` to obtain a live VC count directly from the `identity-oracle`. This ensures real-time accuracy but incurs cross-contract call overhead.
+
+To keep that count path cheap, `identity-oracle` no longer re-checks the revocation registry for every anchored VC on every read. Instead, it caches the active count per subject, seeds the cache lazily from existing anchors on the first touch after upgrade, and then updates the counter incrementally when `anchor_vc` or `mark_vc_revoked` succeeds. The revocation-registry cross-contract lookup remains in the verification helpers and on new anchors so the cache stays aligned with the registry-backed revoke flow.
+
+Benchmarking the cached read path in unit tests produced roughly flat CPU usage across 5, 10, and 20 VCs: 23,808, 23,520, and 25,470 instructions respectively. That is several orders of magnitude below Soroban's current mainnet per-invocation instruction ceiling (600,000,000), so the cached counter keeps `get_active_vc_count(subject)` comfortably within budget even for larger subjects.
 
 ### Fallback Path (Cached)
 
@@ -288,7 +315,7 @@ A trusted issuer (registered by the admin) calls `anchor_vc` with the subject's 
 
 ### 3. Feeder updates credit inputs
 
-An off-chain indexer (the feeder) monitors the subject's on-chain activity, queries identity-oracle for their VC count, and periodically calls `set_vc_count` and `update_tx_stats` on credit-oracle to keep the scoring inputs fresh.
+An off-chain indexer (the feeder) monitors the subject's on-chain activity and periodically calls `set_vc_count` and `update_tx_stats` on credit-oracle to keep the non-identity scoring inputs fresh. The live VC count now comes from the cached `ActiveVCCount(Address)` inside identity-oracle, so the feeder no longer needs to read it for the cross-contract score path.
 
 ### 4. Lender records repayments
 
@@ -372,6 +399,34 @@ caller-supplied `admin` to preserve the existing API surface.
 - `require_auth()` is always called on the *stored* admin, not on an
   unvalidated caller-supplied value.
 - The public function signatures are unchanged; no SDK or script updates needed.
+
+---
+
+### ADR-003 — Governance weight changes respect credit-oracle timelock
+
+**Status:** Accepted
+
+**Context**
+
+The governance contract can update credit-oracle scoring weights through a community vote. Initially, `Governance::execute` called `CreditOracleClient::update_weights()` directly, which immediately applied the new weights without any waiting period. This bypassed the credit-oracle's built-in timelock mechanism (`propose_weights` + `apply_weights`) designed to give the community time to react to weight changes.
+
+**Decision**
+
+Governance `execute` now calls `propose_weights` instead of `update_weights`. This queues the weight change in the credit-oracle's pending state with a 24-hour timelock (17,280 ledgers). A separate `apply_weights` function must be called after the timelock expires to finalize the change.
+
+**Flow:**
+
+1. **Proposal creation**: A proposer creates a governance proposal with new weights and a voting period.
+2. **Voting**: Voters cast votes for or against during the voting period.
+3. **Execution**: After the voting period ends and if quorum is met and votes_for > votes_against, `execute` calls `propose_weights` on credit-oracle, starting the timelock.
+4. **Timelock period**: ~24 hours (17,280 ledgers) during which the community can review the pending weights.
+5. **Application**: Anyone calls `apply_weights` to finalize the change after the timelock expires.
+
+**Consequences**
+
+- Weight changes require both voting period + timelock, providing ample time for community reaction.
+- The `get_scoring_weights` function returns active weights; pending weights are available via `get_pending_weights`.
+- Anyone can call `apply_weights` after the timelock expires, making the finalization permissionless.
 
 ---
 

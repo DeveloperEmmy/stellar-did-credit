@@ -22,14 +22,18 @@ const sdk = new StellarDIDCreditSDK({
 });
 
 const score = await sdk.getScore("G...");
-console.log(score.score); // e.g. 612
+if (score) {
+  console.log(score.score); // e.g. 612
+} else {
+  console.log("No score computed yet");
+}
 ```
 
 ## API
 
-### `getScore(subjectAddress: string): Promise<ScoreRecord>`
+### `getScore(subjectAddress: string): Promise<ScoreRecord | null>`
 
-Fetches the on-chain credit score for a subject address. Uses a read-only simulation — no signing or fees required.
+Fetches the on-chain credit score for a subject address. Uses a read-only simulation — no signing or fees required. Returns `null` if no score has been computed for this address.
 
 ```typescript
 interface ScoreRecord {
@@ -40,6 +44,25 @@ interface ScoreRecord {
   txVolume30d: bigint; // 30-day transaction volume in stroops
 }
 ```
+
+### `computeScore(payerKeypair: Keypair, subjectAddress: string): Promise<ScoreRecord>`
+
+Computes and persists a subject's credit score on-chain. This method submits a transaction to call `compute_score`, waits for confirmation, and then fetches the updated score.
+
+**Important: Cooldown Interaction**
+The `compute_score` contract method is protected by a configurable cooldown period (`ComputeCooldownLedgers`) to prevent spam and reduce computational load.
+- If you call `computeScore` while the cooldown is active, the contract will reject the transaction.
+- **Fresh Deployments**: Depending on the contract's configuration, the cooldown might apply immediately upon initialization. If your first `computeScore` call fails right after a fresh deployment, you may need to wait for the initial cooldown period (e.g., 1 ledger) to pass.
+
+#### Recommended Cooldown Settings
+
+The cooldown can be configured by the contract admin using `update_compute_cooldown`. The ideal setting depends on the environment:
+
+| Environment | Recommended Cooldown (Ledgers) | Rationale |
+|-------------|--------------------------------|-----------|
+| **Development / Local** | `1` | Allows rapid testing and immediate score recomputation. |
+| **Testnet** | `100` (~8 minutes) | Balances testing convenience with realistic network conditions. |
+| **Mainnet** | `17280` (~24 hours) | Prevents spam, reduces fees, and aligns with typical score update frequencies. |
 
 ### Other methods (coming soon)
 

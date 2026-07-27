@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `identity-oracle` and `credit-oracle`: aggregate protocol-level counters stored in instance storage for on-chain operational metrics. Each contract exposes a `get_protocol_stats()` getter that returns a struct with counters updated on every write operation. Identity-oracle tracks `total_dids_anchored`, `total_vcs_anchored`, and `total_vcs_revoked`. Credit-oracle tracks `total_subjects_scored` and `total_repayments_recorded`. Unit tests verify counters increment correctly and do not double-count deduplicated operations (#256)
+- `identity-oracle`: `get_did_document(subject)` — read-only function that returns the anchored DID document CID for a subject, or `None` if no DID is anchored (#229)
+- TypeScript SDK (`@stellar-did-credit/sdk`): `getDIDDocument(subjectAddress)` — fetches the anchored DID document CID from identity-oracle, returning `null` if not set (#229)
+
+### Added
+
 - `cargo doc --workspace` now generates complete Rust API docs with no warnings; all public items across `credit-oracle`, `identity-oracle`, `revocation-registry`, and `governance` have `///` doc comments (#266)
 - `typedoc` generates TypeScript API docs from JSDoc comments in `packages/sdk/src/index.ts`; added `typedoc` as a dev dependency and a `docs` script to the SDK package (#266)
 - Root `package.json` exposes a `docs` script that regenerates both Rust and TypeScript API docs in one command (#266)

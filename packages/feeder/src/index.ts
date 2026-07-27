@@ -104,12 +104,46 @@ export async function fetchHorizonStats(
   // Map from transaction hash → set of distinct counterparty addresses
   const counterpartiesPerTx = new Map<string, Set<string>>();
 
-  let page = await horizon
-    .payments()
-    .forAccount(address)
-    .order("desc")
-    .limit(200)
-    .call();
+  // Rate-limit aware call helper: if Horizon responds with 429 and a
+  // `Retry-After` header, wait that duration and retry.
+  async function callWithHorizonRateLimit<T>(fn: () => Promise<T>): Promise<T> {
+    const maxRateLimitRetries = 5;
+    for (let attempt = 0; ; attempt++) {
+      try {
+        return await fn();
+      } catch (err: any) {
+        const status = err?.response?.status;
+        const headers = err?.response?.headers;
+        if (status === 429 && headers) {
+          // Try to read `Retry-After` header (seconds). Fall back to a small delay.
+          let retryAfterMs = 1000;
+          try {
+            const ra =
+              typeof headers.get === "function"
+                ? headers.get("retry-after")
+                : headers["retry-after"];
+            if (ra) {
+              const sec = Number(ra);
+              if (!Number.isNaN(sec)) retryAfterMs = Math.max(500, sec * 1000);
+            }
+          } catch (e) {
+            // ignore header parsing errors
+          }
+          console.warn(
+            `[feeder] Horizon rate-limited (429); retrying in ${retryAfterMs}ms`,
+          );
+          if (attempt >= maxRateLimitRetries) throw err;
+          await sleep(retryAfterMs);
+          continue;
+        }
+        throw err;
+      }
+    }
+  }
+
+  let page = await callWithHorizonRateLimit(() =>
+    horizon.payments().forAccount(address).order("desc").limit(200).call(),
+  );
 
   outer: while (page.records.length > 0) {
     for (const record of page.records) {
@@ -149,7 +183,7 @@ export async function fetchHorizonStats(
       }
     }
 
-    page = await page.next();
+    page = await callWithHorizonRateLimit(() => page.next());
   }
 
   const txCount30d = txHashes.size;
@@ -345,6 +379,37 @@ export class Feeder {
   }
 
   /**
+   * Checks whether the credit-oracle has an identity-oracle configured
+   * for cross-contract VC count lookups.
+   * Uses a read-only simulation — no signing or fees required.
+   */
+  async getHasIdentityOracle(): Promise<boolean> {
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_identity_oracle"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`get_identity_oracle simulation failed: ${sim.error}`);
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Unexpected simulation response for get_identity_oracle");
+    }
+
+    const result = scValToNative(sim.result!.retval);
+    // Option<Address> — null/undefined means not configured
+    return result !== null && result !== undefined;
+  }
+
+  /**
    * Syncs a single subject: fetches stats, then submits set_vc_count followed
    * by update_tx_stats, waiting for each transaction to be confirmed.
    *
@@ -392,35 +457,47 @@ export class Feeder {
     const creditContract = new Contract(this.config.creditOracleId);
     const feederAddress = this.feederKeypair.publicKey();
 
-    // Step 3: submit set_vc_count
-    const vcCountTxHash = await withExponentialBackoff(
-      `set_vc_count(${subjectAddress})`,
+    // Check if cross-contract VC count lookup is configured
+    const identityOracleConfigured = await withExponentialBackoff(
+      `get_identity_oracle`,
       maxRetries,
       retryBaseDelayMs,
-      () =>
-        submitOperation(
-          this.server,
-          this.config.networkPassphrase,
-          this.feederKeypair,
-          creditContract.call(
-            "set_vc_count",
-            new Address(feederAddress).toScVal(),
-            new Address(subjectAddress).toScVal(),
-            nativeToScVal(vcCount, { type: "u32" }),
-          ),
-        ),
+      () => this.getHasIdentityOracle(),
     );
-    console.log(`  set_vc_count tx   = ${vcCountTxHash}`);
 
-    await withExponentialBackoff(
-      `wait_set_vc_count_confirmation(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () => waitForConfirmation(this.server, vcCountTxHash),
-    );
+    // Step 3: submit set_vc_count (skip if cross-contract is configured)
+    if (identityOracleConfigured) {
+      console.log(`  skipping set_vc_count (cross-contract lookup configured)`);
+    } else {
+      const vcCountTxHash = await withExponentialBackoff(
+        `set_vc_count(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () =>
+          submitOperation(
+            this.server,
+            this.config.networkPassphrase,
+            this.feederKeypair,
+            creditContract.call(
+              "set_vc_count",
+              new Address(feederAddress).toScVal(),
+              new Address(subjectAddress).toScVal(),
+              nativeToScVal(vcCount, { type: "u32" }),
+            ),
+          ),
+      );
+      console.log(`  set_vc_count tx   = ${vcCountTxHash}`);
+
+      await withExponentialBackoff(
+        `wait_set_vc_count_confirmation(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () => waitForConfirmation(this.server, vcCountTxHash),
+      );
+    }
     if (signal?.aborted) {
       console.log(
-        `[feeder] ${subjectAddress} — aborted after set_vc_count confirmation`,
+        `[feeder] ${subjectAddress} — aborted after set_vc_count step`,
       );
       return;
     }
@@ -548,7 +625,26 @@ async function withExponentialBackoff<T>(
         throw err;
       }
 
-      const delayMs = delayBase * 2 ** attempt;
+      // If the error carries a `Retry-After` header, prefer that delay.
+      let retryAfterMs: number | undefined = undefined;
+      try {
+        const status = (err as any)?.response?.status;
+        const headers = (err as any)?.response?.headers;
+        if (status === 429 && headers) {
+          const ra =
+            typeof headers.get === "function"
+              ? headers.get("retry-after")
+              : headers["retry-after"];
+          if (ra) {
+            const sec = Number(ra);
+            if (!Number.isNaN(sec)) retryAfterMs = Math.max(500, sec * 1000);
+          }
+        }
+      } catch (e) {
+        /* ignore */
+      }
+
+      const delayMs = retryAfterMs ?? delayBase * 2 ** attempt;
       console.warn(
         `[feeder] retry ${attempt + 1}/${retries} for ${operationName} in ${delayMs}ms:`,
         err instanceof Error ? err.message : err,
