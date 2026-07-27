@@ -379,6 +379,37 @@ export class Feeder {
   }
 
   /**
+   * Checks whether the credit-oracle has an identity-oracle configured
+   * for cross-contract VC count lookups.
+   * Uses a read-only simulation — no signing or fees required.
+   */
+  async getHasIdentityOracle(): Promise<boolean> {
+    const contract = new Contract(this.config.creditOracleId);
+    const sourceAccount = new Account(this.config.simAccount, "0");
+
+    const tx = new TransactionBuilder(sourceAccount, {
+      fee: BASE_FEE,
+      networkPassphrase: this.config.networkPassphrase,
+    })
+      .addOperation(contract.call("get_identity_oracle"))
+      .setTimeout(30)
+      .build();
+
+    const sim = await this.server.simulateTransaction(tx);
+
+    if (SorobanRpc.Api.isSimulationError(sim)) {
+      throw new Error(`get_identity_oracle simulation failed: ${sim.error}`);
+    }
+    if (!SorobanRpc.Api.isSimulationSuccess(sim)) {
+      throw new Error("Unexpected simulation response for get_identity_oracle");
+    }
+
+    const result = scValToNative(sim.result!.retval);
+    // Option<Address> — null/undefined means not configured
+    return result !== null && result !== undefined;
+  }
+
+  /**
    * Syncs a single subject: fetches stats, then submits set_vc_count followed
    * by update_tx_stats, waiting for each transaction to be confirmed.
    *
@@ -426,35 +457,47 @@ export class Feeder {
     const creditContract = new Contract(this.config.creditOracleId);
     const feederAddress = this.feederKeypair.publicKey();
 
-    // Step 3: submit set_vc_count
-    const vcCountTxHash = await withExponentialBackoff(
-      `set_vc_count(${subjectAddress})`,
+    // Check if cross-contract VC count lookup is configured
+    const identityOracleConfigured = await withExponentialBackoff(
+      `get_identity_oracle`,
       maxRetries,
       retryBaseDelayMs,
-      () =>
-        submitOperation(
-          this.server,
-          this.config.networkPassphrase,
-          this.feederKeypair,
-          creditContract.call(
-            "set_vc_count",
-            new Address(feederAddress).toScVal(),
-            new Address(subjectAddress).toScVal(),
-            nativeToScVal(vcCount, { type: "u32" }),
-          ),
-        ),
+      () => this.getHasIdentityOracle(),
     );
-    console.log(`  set_vc_count tx   = ${vcCountTxHash}`);
 
-    await withExponentialBackoff(
-      `wait_set_vc_count_confirmation(${subjectAddress})`,
-      maxRetries,
-      retryBaseDelayMs,
-      () => waitForConfirmation(this.server, vcCountTxHash),
-    );
+    // Step 3: submit set_vc_count (skip if cross-contract is configured)
+    if (identityOracleConfigured) {
+      console.log(`  skipping set_vc_count (cross-contract lookup configured)`);
+    } else {
+      const vcCountTxHash = await withExponentialBackoff(
+        `set_vc_count(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () =>
+          submitOperation(
+            this.server,
+            this.config.networkPassphrase,
+            this.feederKeypair,
+            creditContract.call(
+              "set_vc_count",
+              new Address(feederAddress).toScVal(),
+              new Address(subjectAddress).toScVal(),
+              nativeToScVal(vcCount, { type: "u32" }),
+            ),
+          ),
+      );
+      console.log(`  set_vc_count tx   = ${vcCountTxHash}`);
+
+      await withExponentialBackoff(
+        `wait_set_vc_count_confirmation(${subjectAddress})`,
+        maxRetries,
+        retryBaseDelayMs,
+        () => waitForConfirmation(this.server, vcCountTxHash),
+      );
+    }
     if (signal?.aborted) {
       console.log(
-        `[feeder] ${subjectAddress} — aborted after set_vc_count confirmation`,
+        `[feeder] ${subjectAddress} — aborted after set_vc_count step`,
       );
       return;
     }

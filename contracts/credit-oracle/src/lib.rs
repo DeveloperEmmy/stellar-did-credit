@@ -367,6 +367,31 @@ impl CreditOracle {
             .unwrap()
     }
 
+    /// Set the identity-oracle contract ID for cross-contract VC count lookups.
+    ///
+    /// When configured, `compute_score` will call `get_active_vc_count` on the
+    /// identity-oracle instead of reading the cached `VcCount` storage key.
+    /// This enables live VC count resolution that automatically excludes revoked VCs.
+    ///
+    /// Auth: admin only.
+    pub fn set_identity_oracle(env: Env, admin: Address, identity_oracle_id: Address) -> Result<(), CreditOracleError> {
+        let stored_admin: Address = env.storage().instance().get(&DataKey::Admin).expect("not initialized");
+        if admin != stored_admin {
+            return Err(CreditOracleError::NotAuthorized);
+        }
+        admin.require_auth();
+        env.storage().instance().set(&DataKey::IdentityOracleId, &identity_oracle_id);
+        env.events().publish((symbol_short!("IdOracle"),), identity_oracle_id);
+        Ok(())
+    }
+
+    /// Returns the configured identity-oracle contract ID, if any.
+    ///
+    /// Returns `None` if cross-contract VC count lookup is not configured.
+    pub fn get_identity_oracle(env: Env) -> Option<Address> {
+        env.storage().instance().get(&DataKey::IdentityOracleId)
+    }
+
     /// Get pending weights (if any)
     pub fn get_pending_weights(env: Env) -> Option<PendingWeightsRecord> {
         let weights: Option<ScoringWeights> = env.storage().instance().get(&DataKey::PendingWeights);
@@ -812,6 +837,42 @@ mod tests {
         assert!(score_with > score_without,
             "subject with 100 counterparties should score higher when tx_weight=100");
     }
+
+    #[test]
+    fn test_get_identity_oracle_returns_none_when_not_configured() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        client.initialize(&admin);
+
+        // Before configuration, get_identity_oracle returns None
+        assert!(client.get_identity_oracle().is_none());
+    }
+
+    #[test]
+    fn test_set_and_get_identity_oracle() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let contract_id = env.register_contract(None, CreditOracle);
+        let client = CreditOracleClient::new(&env, &contract_id);
+
+        let admin = Address::generate(&env);
+        let identity_oracle_id = Address::generate(&env);
+
+        client.initialize(&admin);
+
+        // Set the identity oracle
+        client.set_identity_oracle(&admin, &identity_oracle_id);
+
+        // Verify get_identity_oracle returns the configured address
+        let result = client.get_identity_oracle();
+        assert!(result.is_some());
+        assert_eq!(result.unwrap(), identity_oracle_id);
+    }
+}
 
     #[test]
     fn test_admin_transfer_two_step() {
