@@ -188,7 +188,7 @@ impl IdentityOracle {
         admin.require_auth();
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().extend_ttl(INSTANCE_BUMP_THRESHOLD, INSTANCE_BUMP_AMOUNT);
-        env.events().publish((symbol_short!("Init"),), admin);
+        env.events().publish((Symbol::new(&env, "Initialized"),), admin);
         Ok(())
     }
 
@@ -1057,7 +1057,7 @@ mod tests {
         assert_eq!(topics.len(), 1);
         assert_eq!(
             topics.get(0).unwrap(),
-            soroban_sdk::Val::from(symbol_short!("Init")),
+            soroban_sdk::Val::from(Symbol::new(&env, "Initialized")),
         );
         let event_admin: Address = data.clone().unwrap();
         assert_eq!(event_admin, admin);

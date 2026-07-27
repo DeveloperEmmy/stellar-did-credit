@@ -7,7 +7,7 @@ mod tests {
     use soroban_sdk::{
         symbol_short,
         testutils::{Address as _, Ledger as _},
-        BytesN, Env, String, Val,
+        BytesN, Env, String, Symbol, Val,
     };
 
     #[test]
@@ -32,29 +32,29 @@ mod tests {
         assert_eq!(id_events.len(), 1, "identity-oracle should emit 1 event");
         let (_, topics, data) = &id_events[0];
         assert_eq!(topics.len(), 1);
-        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(symbol_short!("Init")));
+        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(Symbol::new(&env, "Initialized")));
         let event_admin: soroban_sdk::Address = data.clone().unwrap();
-        assert_eq!(event_admin, admin, "Init event admin mismatch for identity-oracle");
+        assert_eq!(event_admin, admin, "Initialized event admin mismatch for identity-oracle");
 
-        // Initialize credit-oracle and verify Init event
+        // Initialize credit-oracle and verify Initialized event
         credit.initialize(&admin);
         let events = env.events().all();
         let credit_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == credit_id).collect();
         assert_eq!(credit_events.len(), 1, "credit-oracle should emit 1 event");
         let (_, topics, data) = &credit_events[0];
         assert_eq!(topics.len(), 1);
-        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(symbol_short!("Init")));
+        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(Symbol::new(&env, "Initialized")));
         let event_admin: soroban_sdk::Address = data.clone().unwrap();
-        assert_eq!(event_admin, admin, "Init event admin mismatch for credit-oracle");
+        assert_eq!(event_admin, admin, "Initialized event admin mismatch for credit-oracle");
 
-        // Initialize revocation-registry and verify Init event
+        // Initialize revocation-registry and verify Initialized event
         revocation.initialize(&admin);
         let events = env.events().all();
         let rev_events: Vec<_> = events.iter().filter(|(id, _, _)| *id == revocation_id).collect();
         assert_eq!(rev_events.len(), 1, "revocation-registry should emit 1 event");
         let (_, topics, data) = &rev_events[0];
         assert_eq!(topics.len(), 1);
-        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(symbol_short!("Init")));
+        assert_eq!(topics.get(0).unwrap(), soroban_sdk::Val::from(Symbol::new(&env, "Initialized")));
         let event_admin: soroban_sdk::Address = data.clone().unwrap();
         assert_eq!(event_admin, admin, "Init event admin mismatch for revocation-registry");
     }
@@ -369,4 +369,22 @@ mod tests {
             vc_hashes.push_back(vc_hash);
         }
 
-        // 5. Assert is_verified is true (5 active VCs)
+// 5. Assert is_verified is true (5 active VCs)
+        assert!(identity.is_verified(&subject));
+
+        // 6. Assert get_vc_count returns 5
+        assert_eq!(identity.get_vc_count(&subject), 5);
+
+        // 7. Create a vector of the first 3 hashes to batch revoke
+        let mut batch_revoke_hashes = soroban_sdk::Vec::new(&env);
+        for i in 0..3usize {
+            batch_revoke_hashes.push_back(vc_hashes.get(i as u32).unwrap());
+        }
+
+        // 8. Batch revoke the 3 VCs on revocation-registry
+        revocation.batch_revoke(&issuer, &batch_revoke_hashes);
+
+        // 9. Assert is_revoked returns true for each of the 3 revoked hashes
+        for i in 0..3usize {
+            let
+        assert!(identity.is_verified(&subject));

@@ -322,7 +322,7 @@ impl CreditOracle {
             &DataKey::ComputeCooldownLedgers,
             &DEFAULT_COMPUTE_COOLDOWN_LEDGERS,
         );
-        env.events().publish((symbol_short!("Init"),), admin);
+        env.events().publish((Symbol::new(&env, "Initialized"),), admin);
         Ok(())
     }
 
@@ -1087,8 +1087,8 @@ mod tests {
         assert_eq!(topics_0.len(), 1);
         assert_eq!(
             topics_0.get(0).unwrap(),
-            soroban_sdk::Val::from(symbol_short!("Init")),
-            "expected Init topic"
+            soroban_sdk::Val::from(Symbol::new(&env, "Initialized")),
+            "expected Initialized topic"
         );
         let event_admin: Address = data_0.clone().unwrap();
         assert_eq!(event_admin, admin);
